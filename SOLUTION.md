@@ -1,129 +1,93 @@
 # Решение лабораторной работы №2
 
-## Состав решения
+## Что сделано
 
-Реализован полный Spark ETL-контур:
+В работе собран полный ETL-процесс на Spark. Исходные CSV-файлы загружаются в PostgreSQL, после этого Spark читает подготовленный staging-слой, строит аналитическую модель в PostgreSQL и формирует отчетные витрины для всех NoSQL-баз из задания
 
-- PostgreSQL: загрузка 10 CSV в staging и хранение итоговой модели звезда/снежинка.
-- Apache Spark: чтение staging из PostgreSQL, построение измерений и факта, расчет отчетов.
-- ClickHouse: 6 обязательных отчетных таблиц.
-- Cassandra: те же 6 отчетов отдельными CQL-таблицами.
-- MongoDB: те же 6 отчетов отдельными коллекциями.
-- Neo4j: те же 6 отчетов отдельными наборами узлов.
-- Valkey: те же 6 отчетов в hash-записях с индексами и meta-ключами.
+В составе решения есть PostgreSQL для исходных данных и модели звезда/снежинка, Spark job для трансформаций, ClickHouse для обязательных отчетов, а также Cassandra, MongoDB, Neo4j и Valkey для дополнительных NoSQL-витрин
+
+Все запускается через Docker Compose, поэтому руками импортировать CSV или отдельно настраивать базы не нужно
 
 ## Запуск
 
-```powershell
-.\scripts\run_etl.ps1
-```
+Основной запуск выполняется командой .\scripts\run_etl.ps1
 
-Полная пересборка с нуля:
+Если нужно полностью пересоздать окружение с нуля, можно сначала удалить volume-ы:
 
-```powershell
 docker compose down -v
 .\scripts\run_etl.ps1
-```
+
+Скрипт поднимает все сервисы, ждет их готовности и запускает Spark job
 
 ## Подключения
 
 PostgreSQL:
 
-- Host: `localhost`
-- Port: `5433`
-- Database: `spark_lab`
-- User: `lab`
-- Password: `lab`
+- Host localhost
+- Port 5433
+- Database spark_lab
+- User lab
+- Password lab
 
 ClickHouse:
 
-- HTTP port: `8124`
-- Native port: `9001`
-- Database: `reports`
-- User: `lab`
-- Password: `lab`
+- HTTP port 8124
+- Native port 9001
+- Database reports
+- User lab
+- Password lab
 
 Cassandra:
 
-- Host: `localhost`
-- Port: `9043`
-- Keyspace: `reports`
+- Host localhost
+- Port 9043
+- Keyspace reports
 
 MongoDB:
 
-- URI: `mongodb://localhost:27018`
-- Database: `reports`
+- URI mongodb://localhost:27018
+- Database reports
 
 Neo4j:
 
-- Browser: `http://localhost:7475`
-- Bolt: `bolt://localhost:7688`
-- Auth: disabled
+- Browser http://localhost:7475
+- Bolt bolt://localhost:7688
+- Auth disabled
 
 Valkey:
 
-- Host: `localhost`
-- Port: `6380`
+- Host localhost
+- Port 6380
 
-## Spark job
+## Как работает Spark job
 
-Основной код находится в `jobs/spark_etl.py`.
+Основной код находится в jobs/spark_etl.py
 
-Spark выполняет:
+Spark читает stage.v_mock_data_typed из PostgreSQL через JDBC, затем строит факт продаж и измерения в схеме dw. После этого на основе полученной модели рассчитываются шесть отчетов: продажи по продуктам, клиентам, времени, магазинам, поставщикам и качеству продукции
 
-1. Чтение `stage.v_mock_data_typed` из PostgreSQL через JDBC.
-2. Построение `dw.fact_sales` и измерений `dw.dim_*` в PostgreSQL.
-3. Расчет отчетов:
-   - `sales_by_product`
-   - `sales_by_customer`
-   - `sales_by_time`
-   - `sales_by_store`
-   - `sales_by_supplier`
-   - `product_quality`
-4. Загрузку этих отчетов в ClickHouse, Cassandra, MongoDB, Neo4j и Valkey.
+Эти же шесть отчетов записываются во все целевые NoSQL-хранилища. В ClickHouse они лежат как таблицы, в Cassandra как CQL-таблицы, в MongoDB как коллекции, в Neo4j как наборы report-узлов, а в Valkey как hash-записи с индексами и meta-ключами
 
 ## Модель PostgreSQL
 
-Зерно факта: одна строка исходного CSV, то есть одна продажа. Исходные поля `id`, `sale_customer_id`, `sale_seller_id`, `sale_product_id` не используются как глобальные ключи, потому что повторяются в каждом файле. Они сохраняются в факте как source-поля для трассировки.
+Зерно факта выбрано как одна строка исходного CSV, то есть одна продажа. Это сделано потому, что исходные поля id, sale_customer_id, sale_seller_id и sale_product_id повторяются в каждом файле и не подходят на роль глобальных ключей
 
-Факт:
+В PostgreSQL создается таблица фактов dw.fact_sales и набор измерений для клиентов, продавцов, магазинов, поставщиков, продуктов, дат, стран и питомцев. Часть атрибутов вынесена в отдельные справочники, поэтому модель получается ближе к снежинке, но центральная аналитическая структура остается классической звездой вокруг факта продаж
 
-- `dw.fact_sales`
-
-Измерения:
-
-- `dw.dim_customer`
-- `dw.dim_seller`
-- `dw.dim_store`
-- `dw.dim_supplier`
-- `dw.dim_product`
-- `dw.dim_date`
-- `dw.dim_country`
-- `dw.dim_product_category`
-- `dw.dim_product_brand`
-- `dw.dim_product_material`
-- `dw.dim_product_color`
-- `dw.dim_product_size`
-- `dw.dim_pet`
-- `dw.dim_pet_type`
-- `dw.dim_pet_breed`
-- `dw.dim_pet_category`
+Исходные идентификаторы при этом не теряются. Они сохраняются в факте как поля для трассировки назад к источнику
 
 ## Проверка
 
-```powershell
-.\scripts\validate.ps1
-```
+Проверка выполняется командой .\scripts\validate.ps1
 
-Ожидаемые ключевые результаты:
+Ожидаемые результаты:
 
-- `stage.mock_data_raw`: 10000 строк.
-- `dw.fact_sales`: 10000 строк.
-- `sales_by_product`: 10000 строк в каждой NoSQL БД.
-- `sales_by_customer`: 10000 строк в каждой NoSQL БД.
-- `sales_by_time`: 12 строк в каждой NoSQL БД.
-- `sales_by_store`: 10000 строк в каждой NoSQL БД.
-- `sales_by_supplier`: 10000 строк в каждой NoSQL БД.
-- `product_quality`: 10000 строк в каждой NoSQL БД.
+- stage.mock_data_raw содержит 10000 строк
+- dw.fact_sales содержит 10000 строк
+- sales_by_product содержит 10000 строк в каждой NoSQL БД
+- sales_by_customer содержит 10000 строк в каждой NoSQL БД
+- sales_by_time содержит 12 строк в каждой NoSQL БД
+- sales_by_store содержит 10000 строк в каждой NoSQL БД
+- sales_by_supplier содержит 10000 строк в каждой NoSQL БД
+- product_quality содержит 10000 строк в каждой NoSQL БД
 
-В данных сохраняется выявленная проблема качества: исходный `sale_total_price` не совпадает с `product_price * sale_quantity`. Поэтому в факте и отчетах есть две суммы: исходная и рассчитанная.
+В данных также зафиксирована проблема качества: исходный sale_total_price не совпадает с product_price * sale_quantity. Поэтому в факте и отчетах сохранены обе суммы: исходная из CSV и рассчитанная по цене и количеству
