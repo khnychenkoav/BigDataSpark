@@ -1,0 +1,157 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bd_spark_postgres
+    environment:
+      POSTGRES_DB: spark_lab
+      POSTGRES_USER: lab
+      POSTGRES_PASSWORD: lab
+      TZ: Europe/Moscow
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - "./исходные данные:/data:ro"
+      - "./sql/postgres:/docker-entrypoint-initdb.d:ro"
+    healthcheck:
+      test: ["CMD-SHELL", "psql -U lab -d spark_lab -tAc \"select count(*) = 10000 from stage.mock_data_raw\" | grep -q t"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8-alpine
+    container_name: bd_spark_clickhouse
+    environment:
+      CLICKHOUSE_DB: reports
+      CLICKHOUSE_USER: lab
+      CLICKHOUSE_PASSWORD: lab
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8124:8123"
+      - "9001:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "clickhouse-client --user lab --password lab --query 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  cassandra:
+    image: cassandra:4.1
+    container_name: bd_spark_cassandra
+    environment:
+      CASSANDRA_CLUSTER_NAME: spark_lab_cluster
+      CASSANDRA_DC: datacenter1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      MAX_HEAP_SIZE: 768M
+      HEAP_NEWSIZE: 256M
+    ports:
+      - "9043:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'describe keyspaces' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+
+  mongodb:
+    image: mongo:7
+    container_name: bd_spark_mongodb
+    ports:
+      - "27018:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok' | grep -q 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: bd_spark_neo4j
+    environment:
+      NEO4J_AUTH: none
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+    ports:
+      - "7475:7474"
+      - "7688:7687"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell 'RETURN 1' >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 60
+
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: bd_spark_valkey
+    ports:
+      - "6380:6379"
+    volumes:
+      - valkey_data:/data
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  spark:
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
+    image: bd-spark-lab:local
+    container_name: bd_spark_submit
+    environment:
+      HOME: /tmp
+      PG_URL: jdbc:postgresql://postgres:5432/spark_lab
+      PG_HOST: postgres
+      PG_PORT: "5432"
+      PG_DB: spark_lab
+      PG_USER: lab
+      PG_PASSWORD: lab
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_NATIVE_PORT: "9000"
+      CLICKHOUSE_DB: reports
+      CLICKHOUSE_USER: lab
+      CLICKHOUSE_PASSWORD: lab
+      CASSANDRA_HOST: cassandra
+      CASSANDRA_PORT: "9042"
+      CASSANDRA_KEYSPACE: reports
+      MONGO_URI: mongodb://mongodb:27017
+      MONGO_DB: reports
+      NEO4J_URI: bolt://neo4j:7687
+      VALKEY_HOST: valkey
+      VALKEY_PORT: "6379"
+    volumes:
+      - "./jobs:/app/jobs:ro"
+    working_dir: /app
+    command: ["sleep", "infinity"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      cassandra:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      valkey:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  clickhouse_data:
+  cassandra_data:
+  mongo_data:
+  neo4j_data:
+  neo4j_logs:
+  valkey_data:
