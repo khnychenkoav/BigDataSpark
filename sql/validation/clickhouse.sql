@@ -1,4 +1,6 @@
-SELECT *
+SELECT
+    table_name,
+    rows_count
 FROM (
     SELECT 'sales_by_product' AS table_name, count() AS rows_count FROM reports.sales_by_product
     UNION ALL SELECT 'sales_by_customer', count() FROM reports.sales_by_customer

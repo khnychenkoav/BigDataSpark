@@ -1,4 +1,3 @@
-import base64
 import json
 import os
 import time
@@ -21,24 +20,18 @@ from pyspark.sql.functions import (
     corr,
     count,
     date_format,
-    dayofmonth,
-    dayofweek,
-    dense_rank,
-    first,
-    lag,
     lit,
     md5,
+    monotonically_increasing_id,
     month,
-    quarter,
     round as spark_round,
     row_number,
     sum as spark_sum,
     to_date,
-    weekofyear,
     when,
     year,
 )
-from pyspark.sql.types import BooleanType, DecimalType, DoubleType, IntegerType, LongType, StringType
+from pyspark.sql.types import BooleanType, DecimalType, DoubleType, LongType
 
 
 PG_URL = os.getenv("PG_URL", "jdbc:postgresql://postgres:5432/spark_lab")
@@ -351,8 +344,24 @@ def write_valkey(report_records):
         )
 
 
-def ranked_dimension(df, key_col, order_cols):
-    return df.withColumn(key_col, row_number().over(Window.orderBy(*[col(c) for c in order_cols])).cast(LongType()))
+def ranked_dimension(df, key_col):
+    return df.withColumn(key_col, (monotonically_increasing_id() + lit(1)).cast(LongType()))
+
+
+def with_top_rank(df, key_col, rank_col, flag_col, order_cols, limit_count):
+    rows = [
+        (row[key_col], position)
+        for position, row in enumerate(df.orderBy(*order_cols).select(key_col).limit(limit_count).collect(), start=1)
+    ]
+    if not rows:
+        return df.withColumn(rank_col, lit(0).cast(LongType())).withColumn(flag_col, lit(False))
+    rank_df = df.sparkSession.createDataFrame(rows, [key_col, rank_col])
+    return (
+        df.join(rank_df, key_col, "left")
+        .fillna({rank_col: 0})
+        .withColumn(rank_col, col(rank_col).cast(LongType()))
+        .withColumn(flag_col, col(rank_col) > lit(0))
+    )
 
 
 def build_dw(spark):
@@ -403,67 +412,39 @@ def build_dw(spark):
         .where(col("country_name").isNotNull())
         .distinct()
     )
-    dim_country = ranked_dimension(countries, "country_key", ["country_name"]).select("country_key", "country_name")
-
-    dates = (
-        typed.select(col("sale_date").alias("full_date"))
-        .union(typed.select(col("product_release_date").alias("full_date")))
-        .union(typed.select(col("product_expiry_date").alias("full_date")))
-        .where(col("full_date").isNotNull())
-        .distinct()
-    )
-    dim_date = dates.select(
-        date_format("full_date", "yyyyMMdd").cast(IntegerType()).alias("date_key"),
-        col("full_date"),
-        year("full_date").cast(IntegerType()).alias("year"),
-        quarter("full_date").cast(IntegerType()).alias("quarter"),
-        month("full_date").cast(IntegerType()).alias("month"),
-        date_format("full_date", "MMMM").alias("month_name"),
-        dayofmonth("full_date").cast(IntegerType()).alias("day_of_month"),
-        dayofweek("full_date").cast(IntegerType()).alias("day_of_week"),
-        date_format("full_date", "EEEE").alias("day_name"),
-        weekofyear("full_date").cast(IntegerType()).alias("week_of_year"),
-    )
+    dim_country = ranked_dimension(countries, "country_key").select("country_key", "country_name")
 
     dim_product_category = ranked_dimension(
         typed.select(col("product_category").alias("product_category_name")).distinct(),
         "product_category_key",
-        ["product_category_name"],
     )
     dim_product_brand = ranked_dimension(
         typed.select(col("product_brand").alias("product_brand_name")).distinct(),
         "product_brand_key",
-        ["product_brand_name"],
     )
     dim_product_material = ranked_dimension(
         typed.select(col("product_material").alias("product_material_name")).distinct(),
         "product_material_key",
-        ["product_material_name"],
     )
     dim_product_color = ranked_dimension(
         typed.select(col("product_color").alias("product_color_name")).distinct(),
         "product_color_key",
-        ["product_color_name"],
     )
     dim_product_size = ranked_dimension(
         typed.select(col("product_size").alias("product_size_name")).distinct(),
         "product_size_key",
-        ["product_size_name"],
     )
     dim_pet_type = ranked_dimension(
         typed.select(col("customer_pet_type").alias("pet_type_name")).distinct(),
         "pet_type_key",
-        ["pet_type_name"],
     )
     dim_pet_breed = ranked_dimension(
         typed.select(col("customer_pet_breed").alias("pet_breed_name")).distinct(),
         "pet_breed_key",
-        ["pet_breed_name"],
     )
     dim_pet_category = ranked_dimension(
         typed.select(col("pet_category").alias("pet_category_name")).distinct(),
         "pet_category_key",
-        ["pet_category_name"],
     )
 
     first_customer = (
@@ -489,7 +470,7 @@ def build_dw(spark):
         .withColumnRenamed("customer_email", "email")
         .withColumnRenamed("customer_postal_code", "postal_code")
     )
-    dim_customer = ranked_dimension(dim_customer, "customer_key", ["email"]).select(
+    dim_customer = ranked_dimension(dim_customer, "customer_key").select(
         "customer_key", "source_customer_id", "first_name", "last_name", "age", "email", "country_key", "postal_code"
     )
 
@@ -514,7 +495,7 @@ def build_dw(spark):
         .withColumnRenamed("seller_email", "email")
         .withColumnRenamed("seller_postal_code", "postal_code")
     )
-    dim_seller = ranked_dimension(dim_seller, "seller_key", ["email"]).select(
+    dim_seller = ranked_dimension(dim_seller, "seller_key").select(
         "seller_key", "source_seller_id", "first_name", "last_name", "email", "country_key", "postal_code"
     )
 
@@ -540,7 +521,7 @@ def build_dw(spark):
         .withColumnRenamed("store_phone", "phone")
         .withColumnRenamed("store_email", "email")
     )
-    dim_store = ranked_dimension(dim_store, "store_key", ["email"]).select(
+    dim_store = ranked_dimension(dim_store, "store_key").select(
         "store_key", "store_name", "store_location", "city", "state", "country_key", "phone", "email"
     )
 
@@ -566,7 +547,7 @@ def build_dw(spark):
         .withColumnRenamed("supplier_address", "address")
         .withColumnRenamed("supplier_city", "city")
     )
-    dim_supplier = ranked_dimension(dim_supplier, "supplier_key", ["email"]).select(
+    dim_supplier = ranked_dimension(dim_supplier, "supplier_key").select(
         "supplier_key", "supplier_name", "contact_name", "email", "phone", "address", "city", "country_key"
     )
 
@@ -582,7 +563,7 @@ def build_dw(spark):
         .select("pet_nk_hash", "customer_pet_name", "pet_type_key", "pet_breed_key", "pet_category_key")
         .withColumnRenamed("customer_pet_name", "pet_name")
     )
-    dim_pet = ranked_dimension(dim_pet, "pet_key", ["pet_nk_hash"]).select(
+    dim_pet = ranked_dimension(dim_pet, "pet_key").select(
         "pet_key", "pet_nk_hash", "pet_name", "pet_type_key", "pet_breed_key", "pet_category_key"
     )
 
@@ -610,12 +591,12 @@ def build_dw(spark):
             "product_description",
             "product_rating",
             "product_reviews",
-            date_format("product_release_date", "yyyyMMdd").cast(IntegerType()).alias("release_date_key"),
-            date_format("product_expiry_date", "yyyyMMdd").cast(IntegerType()).alias("expiry_date_key"),
+            "product_release_date",
+            "product_expiry_date",
         )
         .withColumnRenamed("sale_product_id", "source_product_id")
     )
-    dim_product = ranked_dimension(dim_product, "product_key", ["product_nk_hash"]).select(
+    dim_product = ranked_dimension(dim_product, "product_key").select(
         "product_key",
         "product_nk_hash",
         "source_product_id",
@@ -629,8 +610,8 @@ def build_dw(spark):
         "product_description",
         "product_rating",
         "product_reviews",
-        "release_date_key",
-        "expiry_date_key",
+        "product_release_date",
+        "product_expiry_date",
     )
 
     fact_sales = (
@@ -641,14 +622,14 @@ def build_dw(spark):
         .join(dim_supplier.select("supplier_key", col("email").alias("supplier_email")), "supplier_email")
         .join(dim_pet.select("pet_key", "pet_nk_hash"), "pet_nk_hash")
         .select(
-            row_number().over(Window.orderBy("raw_id")).cast(LongType()).alias("sale_key"),
+            col("raw_id").cast(LongType()).alias("sale_key"),
             col("raw_id").alias("source_row_id"),
             "source_file",
             "source_id",
             col("sale_customer_id").alias("source_customer_id"),
             col("sale_seller_id").alias("source_seller_id"),
             col("sale_product_id").alias("source_product_id"),
-            date_format("sale_date", "yyyyMMdd").cast(IntegerType()).alias("sale_date_key"),
+            "sale_date",
             "customer_key",
             "seller_key",
             "product_key",
@@ -675,18 +656,6 @@ def build_dw(spark):
         "DROP SCHEMA IF EXISTS dw CASCADE",
         "CREATE SCHEMA dw",
         "CREATE TABLE dw.dim_country (country_key bigint PRIMARY KEY, country_name text NOT NULL UNIQUE)",
-        """CREATE TABLE dw.dim_date (
-            date_key integer PRIMARY KEY,
-            full_date date NOT NULL UNIQUE,
-            year integer NOT NULL,
-            quarter integer NOT NULL,
-            month integer NOT NULL,
-            month_name text NOT NULL,
-            day_of_month integer NOT NULL,
-            day_of_week integer NOT NULL,
-            day_name text NOT NULL,
-            week_of_year integer NOT NULL
-        )""",
         "CREATE TABLE dw.dim_product_category (product_category_key bigint PRIMARY KEY, product_category_name text NOT NULL UNIQUE)",
         "CREATE TABLE dw.dim_product_brand (product_brand_key bigint PRIMARY KEY, product_brand_name text NOT NULL UNIQUE)",
         "CREATE TABLE dw.dim_product_material (product_material_key bigint PRIMARY KEY, product_material_name text NOT NULL UNIQUE)",
@@ -756,8 +725,8 @@ def build_dw(spark):
             product_description text NOT NULL,
             product_rating numeric(3, 1) NOT NULL,
             product_reviews integer NOT NULL,
-            release_date_key integer NOT NULL REFERENCES dw.dim_date(date_key),
-            expiry_date_key integer NOT NULL REFERENCES dw.dim_date(date_key)
+            product_release_date date NOT NULL,
+            product_expiry_date date NOT NULL
         )""",
         """CREATE TABLE dw.fact_sales (
             sale_key bigint PRIMARY KEY,
@@ -767,7 +736,7 @@ def build_dw(spark):
             source_customer_id integer NOT NULL,
             source_seller_id integer NOT NULL,
             source_product_id integer NOT NULL,
-            sale_date_key integer NOT NULL REFERENCES dw.dim_date(date_key),
+            sale_date date NOT NULL,
             customer_key bigint NOT NULL REFERENCES dw.dim_customer(customer_key),
             seller_key bigint NOT NULL REFERENCES dw.dim_seller(seller_key),
             product_key bigint NOT NULL REFERENCES dw.dim_product(product_key),
@@ -786,7 +755,6 @@ def build_dw(spark):
 
     tables = [
         ("dw.dim_country", dim_country),
-        ("dw.dim_date", dim_date),
         ("dw.dim_product_category", dim_product_category),
         ("dw.dim_product_brand", dim_product_brand),
         ("dw.dim_product_material", dim_product_material),
@@ -808,7 +776,6 @@ def build_dw(spark):
 
     return {
         "dim_country": dim_country.cache(),
-        "dim_date": dim_date.cache(),
         "dim_product_category": dim_product_category.cache(),
         "dim_product_brand": dim_product_brand.cache(),
         "dim_customer": dim_customer.cache(),
@@ -829,8 +796,6 @@ def build_reports(dw):
     dim_store = dw["dim_store"]
     dim_supplier = dw["dim_supplier"]
     dim_country = dw["dim_country"]
-    dim_date = dw["dim_date"]
-
     product_star = (
         fact_sales.join(dim_product, "product_key")
         .join(dim_product_category, "product_category_key")
@@ -857,8 +822,16 @@ def build_reports(dw):
             "category_source_revenue",
             spark_round(spark_sum("source_revenue").over(Window.partitionBy("product_category_name")), 2),
         )
-        .withColumn("product_units_rank", dense_rank().over(Window.orderBy(col("total_units_sold").desc(), col("product_key"))))
-        .withColumn("is_top_10_by_units", col("product_units_rank") <= lit(10))
+    )
+    product_report = (
+        with_top_rank(
+            product_report,
+            "product_key",
+            "product_units_rank",
+            "is_top_10_by_units",
+            [col("total_units_sold").desc(), col("product_key")],
+            10,
+        )
         .withColumn("report_row_id", col("product_key"))
         .select(*[name for name, _ in REPORT_SCHEMAS["sales_by_product"]])
     )
@@ -877,11 +850,17 @@ def build_reports(dw):
         )
         .withColumn("customer_name", concat_ws(" ", col("first_name"), col("last_name")))
         .withColumn(
-            "customer_revenue_rank", dense_rank().over(Window.orderBy(col("source_revenue").desc(), col("customer_key")))
-        )
-        .withColumn("is_top_10_by_revenue", col("customer_revenue_rank") <= lit(10))
-        .withColumn(
             "country_customer_count", count("*").over(Window.partitionBy("customer_country")).cast(LongType())
+        )
+    )
+    customer_report = (
+        with_top_rank(
+            customer_report,
+            "customer_key",
+            "customer_revenue_rank",
+            "is_top_10_by_revenue",
+            [col("source_revenue").desc(), col("customer_key")],
+            10,
         )
         .withColumn("report_row_id", col("customer_key"))
         .withColumnRenamed("email", "customer_email")
@@ -889,8 +868,7 @@ def build_reports(dw):
     )
 
     time_base = (
-        fact_sales.join(dim_date, fact_sales.sale_date_key == dim_date.date_key)
-        .groupBy(col("year").alias("sales_year"), col("month").alias("sales_month"))
+        fact_sales.groupBy(year("sale_date").alias("sales_year"), month("sale_date").alias("sales_month"))
         .agg(
             count("*").cast(LongType()).alias("sales_count"),
             spark_sum("sale_quantity").cast(LongType()).alias("total_units_sold"),
@@ -898,15 +876,19 @@ def build_reports(dw):
             spark_round(spark_sum("calculated_total_amount"), 2).cast(DoubleType()).alias("calculated_revenue"),
             spark_round(avg("source_sale_total_amount"), 2).cast(DoubleType()).alias("avg_order_amount"),
         )
+        .withColumn("period_index", col("sales_year") * lit(12) + col("sales_month"))
         .withColumn("report_row_id", col("sales_year") * lit(100) + col("sales_month"))
         .withColumn(
             "period_start",
             date_format(to_date(concat_ws("-", col("sales_year"), col("sales_month"), lit(1))), "yyyy-MM-dd"),
         )
     )
-    time_window = Window.orderBy("sales_year", "sales_month")
+    previous_month = time_base.select(
+        (col("period_index") + lit(1)).alias("period_index"),
+        col("source_revenue").alias("prev_month_source_revenue"),
+    )
     time_report = (
-        time_base.withColumn("prev_month_source_revenue", lag("source_revenue").over(time_window))
+        time_base.join(previous_month, "period_index", "left")
         .fillna({"prev_month_source_revenue": 0.0})
         .withColumn("source_revenue_delta", spark_round(col("source_revenue") - col("prev_month_source_revenue"), 2))
         .select(*[name for name, _ in REPORT_SCHEMAS["sales_by_time"]])
@@ -924,12 +906,20 @@ def build_reports(dw):
             spark_round(spark_sum("calculated_total_amount"), 2).cast(DoubleType()).alias("calculated_revenue"),
             spark_round(avg("source_sale_total_amount"), 2).cast(DoubleType()).alias("avg_check"),
         )
-        .withColumn("store_revenue_rank", dense_rank().over(Window.orderBy(col("source_revenue").desc(), col("store_key"))))
-        .withColumn("is_top_5_by_revenue", col("store_revenue_rank") <= lit(5))
         .withColumn("city_source_revenue", spark_round(spark_sum("source_revenue").over(Window.partitionBy("store_city")), 2))
         .withColumn(
             "country_source_revenue",
             spark_round(spark_sum("source_revenue").over(Window.partitionBy("store_country")), 2),
+        )
+    )
+    store_report = (
+        with_top_rank(
+            store_report,
+            "store_key",
+            "store_revenue_rank",
+            "is_top_5_by_revenue",
+            [col("source_revenue").desc(), col("store_key")],
+            5,
         )
         .withColumn("report_row_id", col("store_key"))
         .select(*[name for name, _ in REPORT_SCHEMAS["sales_by_store"]])
@@ -948,12 +938,18 @@ def build_reports(dw):
             spark_round(avg("product_unit_price"), 2).cast(DoubleType()).alias("avg_product_unit_price"),
         )
         .withColumn(
-            "supplier_revenue_rank", dense_rank().over(Window.orderBy(col("source_revenue").desc(), col("supplier_key")))
-        )
-        .withColumn("is_top_5_by_revenue", col("supplier_revenue_rank") <= lit(5))
-        .withColumn(
             "country_source_revenue",
             spark_round(spark_sum("source_revenue").over(Window.partitionBy("supplier_country")), 2),
+        )
+    )
+    supplier_report = (
+        with_top_rank(
+            supplier_report,
+            "supplier_key",
+            "supplier_revenue_rank",
+            "is_top_5_by_revenue",
+            [col("source_revenue").desc(), col("supplier_key")],
+            5,
         )
         .withColumn("report_row_id", col("supplier_key"))
         .select(*[name for name, _ in REPORT_SCHEMAS["sales_by_supplier"]])
@@ -970,14 +966,32 @@ def build_reports(dw):
     correlation_value = quality_base.select(corr("product_rating", "total_units_sold")).first()[0]
     if correlation_value is None:
         correlation_value = 0.0
+    quality_report = quality_base.withColumn("rating_sales_correlation", lit(float(correlation_value)))
+    quality_report = with_top_rank(
+        quality_report,
+        "product_key",
+        "best_rating_rank",
+        "is_top_10_by_rating",
+        [col("product_rating").desc(), col("product_key")],
+        10,
+    )
+    quality_report = with_top_rank(
+        quality_report,
+        "product_key",
+        "worst_rating_rank",
+        "is_bottom_10_by_rating",
+        [col("product_rating").asc(), col("product_key")],
+        10,
+    )
     quality_report = (
-        quality_base.withColumn("rating_sales_correlation", lit(float(correlation_value)))
-        .withColumn("best_rating_rank", dense_rank().over(Window.orderBy(col("product_rating").desc(), col("product_key"))))
-        .withColumn("worst_rating_rank", dense_rank().over(Window.orderBy(col("product_rating").asc(), col("product_key"))))
-        .withColumn("reviews_rank", dense_rank().over(Window.orderBy(col("product_reviews").desc(), col("product_key"))))
-        .withColumn("is_top_10_by_reviews", col("reviews_rank") <= lit(10))
-        .withColumn("is_top_10_by_rating", col("best_rating_rank") <= lit(10))
-        .withColumn("is_bottom_10_by_rating", col("worst_rating_rank") <= lit(10))
+        with_top_rank(
+            quality_report,
+            "product_key",
+            "reviews_rank",
+            "is_top_10_by_reviews",
+            [col("product_reviews").desc(), col("product_key")],
+            10,
+        )
         .withColumn("report_row_id", col("product_key"))
         .select(*[name for name, _ in REPORT_SCHEMAS["product_quality"]])
     )
@@ -995,8 +1009,13 @@ def build_reports(dw):
 def main():
     spark = (
         SparkSession.builder.appName("BigDataSparkLab")
+        .master(os.getenv("SPARK_MASTER", "local[2]"))
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.sql.shuffle.partitions", "8")
+        .config("spark.sql.shuffle.partitions", os.getenv("SPARK_SQL_SHUFFLE_PARTITIONS", "4"))
+        .config("spark.default.parallelism", os.getenv("SPARK_DEFAULT_PARALLELISM", "4"))
+        .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "1g"))
+        .config("spark.executor.memory", os.getenv("SPARK_EXECUTOR_MEMORY", "1g"))
+        .config("spark.driver.maxResultSize", os.getenv("SPARK_DRIVER_MAX_RESULT_SIZE", "256m"))
         .getOrCreate()
     )
     spark.sparkContext.setLogLevel("WARN")

@@ -1,5 +1,13 @@
-docker compose build spark
-docker compose up -d postgres clickhouse cassandra mongodb neo4j valkey
+function Invoke-Checked {
+    param([scriptblock]$Command)
+    & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "Command failed with exit code $LASTEXITCODE"
+    }
+}
+
+Invoke-Checked { docker compose build spark }
+Invoke-Checked { docker compose up -d postgres clickhouse cassandra mongodb neo4j valkey }
 
 $containers = @(
     "bd_spark_postgres",
@@ -31,4 +39,16 @@ if ($notReady.Count -ne 0) {
     throw "Some services did not become healthy in time"
 }
 
-docker compose run --rm spark /opt/spark/bin/spark-submit --conf spark.jars.ivy=/tmp/.ivy2 --packages org.postgresql:postgresql:42.7.4 /app/jobs/spark_etl.py
+Invoke-Checked { docker compose run --rm spark /opt/spark/bin/spark-submit /app/jobs/spark_etl.py }
+Invoke-Checked { docker cp sql/validation/postgres.sql bd_spark_postgres:/tmp/postgres_validation.sql }
+Invoke-Checked { docker cp sql/validation/clickhouse.sql bd_spark_clickhouse:/tmp/clickhouse_validation.sql }
+Invoke-Checked { docker cp sql/validation/cassandra.cql bd_spark_cassandra:/tmp/cassandra_validation.cql }
+Invoke-Checked { docker cp sql/validation/mongodb.js bd_spark_mongodb:/tmp/mongodb_validation.js }
+Invoke-Checked { docker cp sql/validation/neo4j.cypher bd_spark_neo4j:/tmp/neo4j_validation.cypher }
+
+Invoke-Checked { docker exec bd_spark_postgres psql -U lab -d spark_lab -f /tmp/postgres_validation.sql }
+Invoke-Checked { docker exec bd_spark_clickhouse clickhouse-client --user lab --password lab --multiquery --queries-file /tmp/clickhouse_validation.sql }
+Invoke-Checked { docker exec bd_spark_cassandra cqlsh -f /tmp/cassandra_validation.cql }
+Invoke-Checked { docker exec bd_spark_mongodb mongosh --quiet /tmp/mongodb_validation.js }
+Invoke-Checked { docker exec bd_spark_neo4j cypher-shell -f /tmp/neo4j_validation.cypher }
+Invoke-Checked { docker exec bd_spark_valkey valkey-cli --scan --pattern 'reports:*:meta' }
